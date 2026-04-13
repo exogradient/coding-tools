@@ -1,0 +1,305 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+HISTORY="$HOME/.claude/history.jsonl"
+SESSIONS_DIR="$HOME/.claude/sessions"
+HOME_PREFIX="$HOME/"
+
+# --- helpers ---
+
+human_time() {
+  local seconds=$1
+  if (( seconds < 60 )); then echo "${seconds}s ago"
+  elif (( seconds < 3600 )); then echo "$(( seconds / 60 ))m ago"
+  elif (( seconds < 86400 )); then echo "$(( seconds / 3600 ))h ago"
+  else echo "$(( seconds / 86400 ))d ago"; fi
+}
+
+parse_project() {
+  local path="$1"
+
+  # skip noise entries
+  if [[ "$path" == "$HOME" || "$path" == "$HOME/.claude" ]]; then
+    return 1
+  fi
+
+  local rel="${path#$HOME_PREFIX}"
+  local org repo
+
+  org="${rel%%/*}"
+  repo="${rel#*/}"
+  if [[ "$repo" == */* ]]; then
+    repo="${rel##*/}"
+    local parent="${rel%/*}"
+    org="${parent##*/}"
+  elif [[ "$repo" == "$org" ]]; then
+    repo="(root)"
+  fi
+
+  printf '%s\t%s' "$org" "$repo"
+}
+
+# --- active sessions: single jq process for all files ---
+
+active_paths() {
+  local files=("$SESSIONS_DIR"/*.json)
+  [[ -e "${files[0]}" ]] || return 0
+  jq -r '[.pid, .cwd] | @tsv' "${files[@]}" 2>/dev/null | while IFS=$'\t' read -r pid cwd; do
+    kill -0 "$pid" 2>/dev/null && echo "$cwd"
+  done
+}
+
+# --- frecency: single jq pass, outputs TSV directly ---
+
+frecency_tsv() {
+  local now_ms sort_field="${1:-score}"
+  now_ms=$(date +%s)000
+  jq -sr --argjson now "$now_ms" --arg sort "$sort_field" '
+    group_by(.project)
+    | map(select(.[0].project != null and .[0].project != ""))
+    | map({
+        project: .[0].project,
+        sessions: (map(.sessionId) | unique | length),
+        count: length,
+        last: (map(.timestamp) | max),
+        score: (
+          map(
+            (($now - .timestamp) / 3600000)
+            | if . < 4 then 100
+              elif . < 24 then 70
+              elif . < 168 then 50
+              elif . < 720 then 30
+              else 10 end
+          ) | add
+        )
+      })
+    | map(.score = (.score * (1 + (0.1 * ((.sessions) | log)))))
+    | (if $sort == "last" then sort_by(-.last) else sort_by(-.score) end)
+    | .[] | "\(.project)\t\(.last)"
+  ' "$HISTORY"
+}
+
+# --- build display list ---
+# Output: repo\torg\ttime_str\tactive_mark\tpath
+
+build_list() {
+  local query="${1:-}" sort_by="${2:-score}"
+  local now_s active_list
+  now_s=$(date +%s)
+  active_list=$(active_paths)
+
+  # enable case-insensitive matching (avoids per-project tr subshells)
+  if [[ -n "$query" ]]; then
+    shopt -s nocasematch
+  fi
+
+  frecency_tsv "$sort_by" | while IFS=$'\t' read -r project last_ts; do
+    [[ -d "$project" ]] || continue
+
+    local org_repo
+    org_repo=$(parse_project "$project") || continue
+    local org repo
+    IFS=$'\t' read -r org repo <<< "$org_repo"
+
+    # case-insensitive substring match (nocasematch, no subshells)
+    if [[ -n "$query" ]]; then
+      [[ "${repo} ${org}" == *"$query"* ]] || continue
+    fi
+
+    local last_s=$(( last_ts / 1000 ))
+    local age_s=$(( now_s - last_s ))
+    local time_str
+    time_str=$(human_time "$age_s")
+
+    # active check: pattern match instead of spawning grep per project
+    local active_mark=" "
+    case "$active_list" in
+      "$project"|"$project"$'\n'*|*$'\n'"$project"|*$'\n'"$project"$'\n'*)
+        active_mark="●" ;;
+    esac
+
+    printf '%s\t%s\t%s\t%s\t%s\n' "$repo" "$org" "$time_str" "$active_mark" "$project"
+  done
+}
+
+# --- cmd_ls: all projects sorted by recency ---
+
+cmd_ls() {
+  local lines
+  lines=$(build_list "" "last")
+  if [[ -z "$lines" ]]; then
+    echo "No projects found in Claude history." >&2
+    return 0
+  fi
+  printf '\e[1m %-22s %-14s %8s  %s\e[0m\n' "PROJECT" "ORG" "LAST" ""
+  while IFS=$'\t' read -r repo org time_str active _path; do
+    if [[ "$active" == "●" ]]; then
+      printf ' \e[32m%-22s %-14s %8s  %s\e[0m\n' "$repo" "$org" "$time_str" "$active"
+    else
+      printf ' %-22s %-14s %8s  %s\n' "$repo" "$org" "$time_str" "$active"
+    fi
+  done <<< "$lines"
+}
+
+# --- terminal cleanup helper ---
+
+cleanup_terminal() {
+  local saved_stty="$1"
+  stty "$saved_stty" 2>/dev/null || true
+  printf '\e[?25h' >&2
+}
+
+# --- arrow-key selector ---
+# UI renders to stderr, selected path goes to stdout
+
+selector() {
+  local query="${1:-}"
+  local items=()
+  local paths=()
+
+  while IFS=$'\t' read -r repo org time_str active path; do
+    items+=("$(printf '%-22s %-14s %8s  %s' "$repo" "$org" "$time_str" "$active")")
+    paths+=("$path")
+  done < <(build_list "$query")
+
+  if (( ${#items[@]} == 0 )); then
+    if [[ -n "$query" ]]; then
+      echo "ccjump: no projects matching '$query'" >&2
+    else
+      echo "ccjump: no projects found in Claude history." >&2
+    fi
+    return 1
+  fi
+
+  # single match: return immediately
+  if (( ${#items[@]} == 1 )); then
+    echo "${paths[0]}"
+    return 0
+  fi
+
+  # interactive selector
+  local selected=0
+  local total=${#items[@]}
+  local old_stty
+  old_stty=$(stty -g)
+  trap 'cleanup_terminal "$old_stty"' EXIT
+
+  stty -echo raw
+  printf '\e[?25l' >&2  # hide cursor
+
+  draw() {
+    printf '\e[%dA' "$total" >&2 2>/dev/null || true
+    local j
+    for (( j=0; j<total; j++ )); do
+      if (( j == selected )); then
+        printf '\e[2K  \e[36m❯\e[0m \e[1m%s\e[0m\r\n' "${items[$j]}" >&2
+      else
+        printf '\e[2K    %s\r\n' "${items[$j]}" >&2
+      fi
+    done
+  }
+
+  # initial draw
+  local j
+  for (( j=0; j<total; j++ )); do
+    if (( j == selected )); then
+      printf '  \e[36m❯\e[0m \e[1m%s\e[0m\r\n' "${items[$j]}" >&2
+    else
+      printf '    %s\r\n' "${items[$j]}" >&2
+    fi
+  done
+
+  while true; do
+    local key
+    IFS= read -rsn1 key
+    case "$key" in
+      $'\x1b')  # escape sequence — read byte by byte (bash 3.2 safe)
+        local b1="" b2="" b3=""
+        IFS= read -rsn1 -t 1 b1 2>/dev/null || true
+        if [[ "$b1" == "[" ]]; then
+          IFS= read -rsn1 -t 1 b2 2>/dev/null || true
+          case "$b2" in
+            A) (( selected > 0 )) && (( selected-- )); draw ;;          # up
+            B) (( selected < total-1 )) && (( selected++ )); draw ;;    # down
+            [0-9])  # extended sequence like PageUp=[5~ PageDown=[6~
+              IFS= read -rsn1 -t 1 b3 2>/dev/null || true
+              local page_size=$(( total < 10 ? total : 10 ))
+              case "${b2}${b3}" in
+                '5~')  # page up
+                  (( selected = selected - page_size < 0 ? 0 : selected - page_size ))
+                  draw ;;
+                '6~')  # page down
+                  (( selected = selected + page_size >= total ? total - 1 : selected + page_size ))
+                  draw ;;
+              esac
+              ;;
+          esac
+        else
+          # bare Esc — cancel
+          cleanup_terminal "$old_stty"
+          trap - EXIT
+          return 1
+        fi
+        ;;
+      ""|$'\n')  # Enter
+        cleanup_terminal "$old_stty"
+        trap - EXIT
+        echo "${paths[$selected]}"
+        return 0
+        ;;
+      q)  # quit
+        cleanup_terminal "$old_stty"
+        trap - EXIT
+        return 1
+        ;;
+    esac
+  done
+}
+
+# --- main ---
+
+main() {
+  if [[ ! -f "$HISTORY" ]]; then
+    echo "ccjump: Claude history not found at $HISTORY" >&2
+    exit 1
+  fi
+
+  case "${1:-}" in
+    ls)
+      cmd_ls
+      ;;
+    "")
+      if [[ -t 2 && -t 0 ]]; then
+        selector
+      else
+        local all_lines result
+        all_lines=$(build_list) || true
+        result=$(echo "$all_lines" | head -1 | cut -f5)
+        if [[ -n "$result" ]]; then
+          echo "$result"
+        else
+          echo "ccjump: no projects found." >&2
+          exit 1
+        fi
+      fi
+      ;;
+    *)
+      local query="$1"
+      if [[ -t 2 && -t 0 ]]; then
+        selector "$query"
+      else
+        local all_lines result
+        all_lines=$(build_list "$query") || true
+        result=$(echo "$all_lines" | head -1 | cut -f5)
+        if [[ -n "$result" ]]; then
+          echo "$result"
+        else
+          echo "ccjump: no projects matching '$query'" >&2
+          exit 1
+        fi
+      fi
+      ;;
+  esac
+}
+
+main "$@"
