@@ -1,0 +1,7 @@
+{
+  "port": 7391,
+  "pages": [
+    { "slug": "sessions", "label": "Live Sessions", "dir": "~/exogradient/coding-tools/sessions" },
+    { "slug": "architecture", "label": "Architecture", "dir": "~/playground-org/a-cool-repo/pages/architecture" }
+  ]
+}

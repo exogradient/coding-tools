@@ -1,0 +1,14 @@
+{
+  "name": "cctap-local",
+  "owner": {
+    "name": "xouyang1"
+  },
+  "plugins": [
+    {
+      "name": "cctap",
+      "description": "Permission gate state + CC runtime data readers",
+      "source": "./",
+      "strict": false
+    }
+  ]
+}

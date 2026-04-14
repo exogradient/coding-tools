@@ -1,0 +1,345 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+CLAUDE_DIR="$HOME/.claude"
+HISTORY="$CLAUDE_DIR/history.jsonl"
+SESSIONS_DIR="$CLAUDE_DIR/sessions"
+STATE_DIR="$HOME/.cctap"
+STATE_FILE="$STATE_DIR/state.json"
+GATES_DIR="$STATE_DIR/gates"
+
+TMP=$(mktemp -d)
+trap 'rm -rf "$TMP"' EXIT
+
+# ---------------------------------------------------------------------------
+# Terminal detection — walk process tree to find terminal app
+# ---------------------------------------------------------------------------
+
+detect_terminal() {
+  local cur=$1
+  for (( i=0; i<8; i++ )); do
+    local out
+    out=$(ps -o ppid=,command= -p "$cur" 2>/dev/null) || break
+    [[ -z "$out" ]] && break
+
+    local ppid cmd
+    read -r ppid cmd <<< "$out"
+
+    local cmd_lower
+    cmd_lower=$(printf '%s' "$cmd" | tr '[:upper:]' '[:lower:]')
+
+    case "$cmd_lower" in
+      *tmux*)
+        if [[ "$cmd" =~ -s[[:space:]]+([^[:space:]]+) ]]; then
+          echo "tmux:${BASH_REMATCH[1]}"
+        else echo "tmux"; fi
+        return ;;
+      *screen*)       echo "screen"; return ;;
+      *ghostty*)      echo "Ghostty"; return ;;
+      *iterm*)        echo "iTerm2"; return ;;
+      *terminal.app*) echo "Terminal.app"; return ;;
+      *alacritty*)    echo "Alacritty"; return ;;
+      *kitty*)        echo "kitty"; return ;;
+      *wezterm*)      echo "WezTerm"; return ;;
+      *warp*)         echo "Warp"; return ;;
+      *code*)         echo "VS Code"; return ;;
+    esac
+
+    [[ "$ppid" -le 1 ]] 2>/dev/null && break
+    cur="$ppid"
+  done
+}
+
+# ---------------------------------------------------------------------------
+# Readers
+# ---------------------------------------------------------------------------
+
+# read_history: parse history.jsonl → $TMP/history.json + $TMP/path_map.json
+read_history() {
+  local hours="${1:-24}"
+  if [[ ! -f "$HISTORY" ]]; then
+    echo '[]' > "$TMP/history.json"
+    echo '{}' > "$TMP/path_map.json"
+    return
+  fi
+
+  local now_ms=$(( $(date +%s) * 1000 ))
+  local cutoff_ms=$(( now_ms - hours * 3600000 ))
+
+  jq -Rs --argjson cutoff "$cutoff_ms" '
+    def throwaway: ["/clear","exit","/exit","quit","/quit","/help","y","n"];
+
+    split("\n")
+    | map(select(length > 0) | try fromjson catch null)
+    | map(select(. != null and .sessionId != null and .sessionId != ""))
+    | group_by(.sessionId)
+    | map(
+        sort_by(.timestamp) as $sorted
+        | {
+            sessionId: $sorted[-1].sessionId,
+            fullPath:  ($sorted[-1].project // ""),
+            prompts:   length,
+            firstPrompt:  ($sorted[0].display  // "")[0:200],
+            lastPromptRaw: ($sorted[-1].display // "")[0:200],
+            prevPrompt: (if length > 1 then ($sorted[-2].display // "")[0:200] else "" end),
+            firstTs: ($sorted[0].timestamp  // 0),
+            lastTs:  ($sorted[-1].timestamp // 0),
+          }
+        | .project = (.fullPath | split("/") | last // "")
+        | .lastPrompt = (
+            (.lastPromptRaw | sub("^\\s+";"") | sub("\\s+$";"") | ascii_downcase) as $lp
+            | if ($lp | IN(throwaway[])) and .prevPrompt != ""
+              then .prevPrompt else .lastPromptRaw end
+          )
+      ) as $all
+    | {
+        history: [$all[] | select(.lastTs >= $cutoff)],
+        pathMap: (reduce $all[] as $s ({};
+          if $s.fullPath != "" then
+            .[$s.fullPath] = ((.[$s.fullPath] // []) + [{sessionId: $s.sessionId, lastTs: $s.lastTs}])
+          else . end
+        ))
+      }
+  ' "$HISTORY" > "$TMP/history_all.json"
+
+  jq '.history' "$TMP/history_all.json" > "$TMP/history.json"
+  jq '.pathMap' "$TMP/history_all.json" > "$TMP/path_map.json"
+}
+
+# read_sessions: session files + liveness + terminal detection + stale ID correction
+read_sessions() {
+  [[ -d "$SESSIONS_DIR" ]] || { echo '[]'; return; }
+  local files=("$SESSIONS_DIR"/*.json)
+  [[ -e "${files[0]}" ]] || { echo '[]'; return; }
+  [[ -f "$TMP/path_map.json" ]] || echo '{}' > "$TMP/path_map.json"
+
+  > "$TMP/raw_sessions.jsonl"
+
+  for f in "${files[@]}"; do
+    local bn="${f##*/}"
+    local pid="${bn%.json}"
+    [[ "$pid" =~ ^[0-9]+$ ]] || continue
+
+    local alive=false
+    kill -0 "$pid" 2>/dev/null && alive=true
+
+    local line
+    line=$(head -1 "$f" 2>/dev/null) || continue
+    echo "$line" | jq empty 2>/dev/null || continue
+
+    local terminal=""
+    [[ "$alive" == true ]] && terminal=$(detect_terminal "$pid")
+
+    # Busy detection: Claude spawns `caffeinate -i -t 300` while actively working
+    local busy=false
+    if [[ "$alive" == true ]]; then
+      pgrep -P "$pid" -f caffeinate >/dev/null 2>&1 && busy=true
+    fi
+
+    echo "$line" | jq -c \
+      --argjson pid "$pid" \
+      --argjson alive "$alive" \
+      --argjson busy "$busy" \
+      --arg terminal "${terminal:-}" \
+      '{
+        sessionId:  (.sessionId  // ""),
+        pid:        $pid,
+        alive:      $alive,
+        busy:       $busy,
+        cwd:        (.cwd        // ""),
+        project:    ((.cwd // "") | split("/") | last // ""),
+        kind:       (.kind       // ""),
+        entrypoint: (.entrypoint // ""),
+        name:       (.name       // ""),
+        startedAt:  (.startedAt  // 0),
+        terminal:   $terminal
+      }' >> "$TMP/raw_sessions.jsonl" 2>/dev/null
+  done
+
+  if [[ ! -s "$TMP/raw_sessions.jsonl" ]]; then
+    echo '[]'
+    return
+  fi
+
+  # Stale session ID correction: if a session file's ID has no recent history,
+  # adopt the most recent unclaimed session on the same path.
+  jq -s --slurpfile pm "$TMP/path_map.json" '
+    ($pm[0] // {}) as $pathMap
+    | reduce .[] as $sess (
+        {claimed: {}, result: []};
+        . as $state
+        | $sess.sessionId as $origSid
+        | $sess.cwd as $cwd
+        | (
+            if $sess.alive and $cwd != "" then
+              ($pathMap[$cwd] // []) as $candidates
+              | ($candidates | map(select(.sessionId == $origSid)) | first) as $entry
+              | if ($entry == null) or ($entry.lastTs < (now * 1000 - 86400000)) then
+                  [($candidates | sort_by(-.lastTs))[]
+                   | select(.sessionId != $origSid
+                            and ($state.claimed[.sessionId] | not))]
+                  | first // null
+                  | if . then .sessionId else $origSid end
+                else $origSid end
+            else $origSid end
+          ) as $corrected
+        | .claimed[$corrected] = true
+        | .result += [$sess | .sessionId = $corrected]
+      )
+    | .result
+  ' "$TMP/raw_sessions.jsonl"
+}
+
+read_ghostty() {
+  local out
+  out=$(osascript -e '
+tell application "Ghostty"
+    set output to ""
+    repeat with w in every window
+        repeat with t in every tab of w
+            set tIdx to index of t
+            repeat with term in every terminal of t
+                set termId to id of term
+                set termName to name of term
+                set termDir to «class Gwdr» of term
+                set output to output & tIdx & "|" & termId & "|" & termDir & "|" & termName & linefeed
+            end repeat
+        end repeat
+    end repeat
+    return output
+end tell
+' 2>/dev/null) || { echo '[]'; return; }
+
+  [[ -z "$out" ]] && { echo '[]'; return; }
+
+  echo "$out" | jq -Rs '
+    split("\n")
+    | map(select(contains("|")))
+    | map(
+        split("|")
+        | {
+            tabIndex:   (.[0] | tonumber? // 0),
+            terminalId: .[1],
+            cwd:        .[2],
+            title:      (.[3:] | join("|"))
+          }
+      )
+  '
+}
+
+read_gates() {
+  [[ -d "$GATES_DIR" ]] || { echo '[]'; return; }
+  local files=("$GATES_DIR"/*.json)
+  [[ -e "${files[0]}" ]] || { echo '[]'; return; }
+  jq -s '.' "${files[@]}" 2>/dev/null || echo '[]'
+}
+
+# Remove gate files for sessions that have had activity after the gate timestamp
+cleanup_gates() {
+  [[ -d "$GATES_DIR" ]] || return 0
+  [[ -f "$TMP/history.json" ]] || return 0
+  local files=("$GATES_DIR"/*.json)
+  [[ -e "${files[0]}" ]] || return 0
+
+  local to_delete
+  to_delete=$(jq -s --slurpfile hist "$TMP/history.json" '
+    ($hist[0] | map({key: .sessionId, value: .lastTs}) | from_entries) as $hm
+    | .[]
+    | select((.session_id as $sid | $hm[$sid] // 0) > (.timestamp // 0))
+    | .session_id
+  ' "${files[@]}" 2>/dev/null) || return 0
+
+  [[ -z "$to_delete" ]] && return 0
+
+  local sid
+  while IFS= read -r sid; do
+    if [[ -n "$sid" ]]; then
+      rm -f "$GATES_DIR/$sid.json"
+    fi
+  done <<< "$to_delete"
+}
+
+# ---------------------------------------------------------------------------
+# State assembly
+# ---------------------------------------------------------------------------
+
+_ALL=false
+_SECTIONS=()
+
+want() {
+  [[ "$_ALL" == true ]] && return 0
+  local s; for s in "${_SECTIONS[@]}"; do [[ "$s" == "$1" ]] && return 0; done
+  return 1
+}
+
+write_state() {
+  _SECTIONS=("$@")
+  [[ ${#_SECTIONS[@]} -eq 0 ]] && _ALL=true || _ALL=false
+
+  mkdir -p "$STATE_DIR"
+
+  # History must run first — populates path_map consumed by read_sessions
+  if want history || want sessions; then
+    read_history 24
+  else
+    echo '[]' > "$TMP/history.json"
+    echo '{}' > "$TMP/path_map.json"
+  fi
+
+  # Run requested readers
+  want sessions && read_sessions > "$TMP/sessions.json"
+  want ghostty  && read_ghostty  > "$TMP/ghostty.json"
+  if want gates; then
+    read_gates > "$TMP/gates.json"
+    cleanup_gates
+  fi
+
+  # Assemble state with a single jq call
+  local now_ms=$(( $(date +%s) * 1000 ))
+  local jq_args=( -n --argjson ts "$now_ms" )
+  local jq_expr='{timestamp: $ts'
+
+  if want history && [[ -f "$TMP/history.json" ]]; then
+    jq_args+=( --slurpfile h "$TMP/history.json" )
+    jq_expr+=', history: $h[0]'
+  fi
+  if want sessions && [[ -f "$TMP/sessions.json" ]]; then
+    jq_args+=( --slurpfile s "$TMP/sessions.json" )
+    jq_expr+=', sessions: $s[0]'
+  fi
+  if want ghostty && [[ -f "$TMP/ghostty.json" ]]; then
+    jq_args+=( --slurpfile g "$TMP/ghostty.json" )
+    jq_expr+=', ghostty: $g[0]'
+  fi
+  if want gates && [[ -f "$TMP/gates.json" ]]; then
+    jq_args+=( --slurpfile gates "$TMP/gates.json" )
+    jq_expr+=', gates: $gates[0]'
+  fi
+  jq_expr+='}'
+
+  jq "${jq_args[@]}" "$jq_expr" > "$STATE_FILE"
+}
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+
+case "${1:-}" in
+  read)
+    shift
+    write_state "$@"
+    jq '.' "$STATE_FILE"
+    ;;
+  watch)
+    interval="${2:-3}"
+    echo "cctap watching every ${interval}s → $STATE_FILE" >&2
+    while true; do
+      write_state 2>/dev/null || true
+      sleep "$interval"
+    done
+    ;;
+  *)
+    echo "usage: cctap <read|watch> [sections|interval]"
+    exit 1
+    ;;
+esac

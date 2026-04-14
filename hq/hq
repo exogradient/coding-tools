@@ -1,0 +1,19 @@
+#!/bin/bash
+# hq — command center CLI
+HQ_DIR="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
+
+case "${1:-dashboard}" in
+  dashboard)
+    exec "$HQ_DIR/dashboard"
+    ;;
+  serve)
+    exec bun "$HQ_DIR/server.ts"
+    ;;
+  *)
+    echo "usage: hq [command]"
+    echo ""
+    echo "commands:"
+    echo "  dashboard   Open dashboard in browser (default)"
+    echo "  serve       Start the hq server"
+    ;;
+esac

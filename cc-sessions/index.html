@@ -1,0 +1,464 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CC Sessions</title>
+<style>
+  :root {
+    --bg: #0d1117;
+    --surface: #161b22;
+    --surface2: #1c2129;
+    --border: #30363d;
+    --text: #e6edf3;
+    --text-muted: #8b949e;
+    --accent: #c084fc;
+    --accent2: #818cf8;
+    --green: #3fb950;
+    --red: #f85149;
+    --yellow: #d29922;
+    --amber: #db8b00;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: 'SF Mono', 'Cascadia Code', 'Fira Code', monospace;
+    background: var(--bg);
+    color: var(--text);
+    padding: 20px;
+    max-width: 1400px;
+    margin: 0 auto;
+    font-size: 13px;
+  }
+  .header-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    margin-bottom: 16px;
+  }
+  h1 { font-size: 16px; font-weight: 600; }
+  h1 span { color: var(--accent); }
+  .meta { color: var(--text-muted); font-size: 11px; }
+  .meta .dot { display: inline-block; width: 6px; height: 6px; border-radius: 50%; margin-right: 4px; animation: pulse 2s ease-in-out infinite; }
+  .meta .dot.live { background: var(--green); }
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
+
+  .section-header {
+    display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;
+  }
+  h2 { font-size: 12px; font-weight: 600; color: var(--text-muted); text-transform: uppercase; letter-spacing: 1px; }
+  .controls { display: flex; gap: 8px; align-items: center; }
+  .pill-group { display: flex; }
+  .pill {
+    font-family: inherit; font-size: 10px; padding: 3px 10px;
+    border: 1px solid var(--border); background: var(--surface); color: var(--text-muted);
+    cursor: pointer; transition: all 0.15s;
+  }
+  .pill:first-child { border-radius: 4px 0 0 4px; }
+  .pill:last-child { border-radius: 0 4px 4px 0; }
+  .pill:not(:first-child) { border-left: none; }
+  .pill.active { background: var(--accent); color: var(--bg); border-color: var(--accent); font-weight: 600; }
+  .pill:hover:not(.active) { background: var(--surface2); color: var(--text); }
+
+  .summary { font-size: 11px; color: var(--text-muted); margin-bottom: 8px; padding-left: 10px; }
+
+  .gate-msg { color: #ffb347; font-size: 10px; font-weight: 600; }
+
+  table { width: 100%; border-collapse: collapse; margin-bottom: 24px; }
+  th {
+    text-align: left; font-size: 10px; font-weight: 600; color: var(--text-muted);
+    text-transform: uppercase; letter-spacing: 0.5px; padding: 6px 8px;
+    border-bottom: 1px solid var(--border); user-select: none; cursor: default;
+  }
+  th.sortable { cursor: pointer; }
+  th.sortable:hover { color: var(--text); }
+  th .arrow { font-size: 9px; margin-left: 3px; opacity: 0.25; }
+  th.sort-active .arrow { opacity: 1; color: var(--accent); }
+  td { padding: 7px 8px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  tr:hover { background: var(--surface2); }
+  tr.inactive { opacity: 0.5; }
+  tr.inactive:hover { opacity: 0.8; }
+  tr.has-gate { background: #3d2200; border-left: 3px solid var(--amber); }
+  tr.has-gate:hover { background: #4d2d00; }
+
+  .dot-cell { width: 20px; }
+  .status-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; }
+  .status-dot.on { background: var(--green); }
+  .status-dot.busy { background: var(--accent); animation: busy-ripple 1.2s ease-out infinite; }
+  @keyframes busy-ripple {
+    0% { box-shadow: 0 0 0 0 rgba(192,132,252,0.6); }
+    70% { box-shadow: 0 0 0 6px rgba(192,132,252,0); }
+    100% { box-shadow: 0 0 0 0 rgba(192,132,252,0); }
+  }
+  .status-dot.off { background: var(--border); }
+  .status-dot.gate { background: var(--amber); animation: pulse 1.5s ease-in-out infinite; }
+
+  .sid { color: var(--text-muted); font-size: 10px; }
+  .project-name { color: var(--accent); font-weight: 600; }
+  .prompt-cell {
+    max-width: 300px; overflow: hidden; text-overflow: ellipsis;
+    white-space: nowrap; position: relative;
+  }
+  .prompt-cell[data-full]:hover::after {
+    content: attr(data-full); position: absolute; left: 0; top: 100%; z-index: 20;
+    background: #1f2937; color: var(--text); border: 1px solid var(--border);
+    border-radius: 6px; padding: 8px 10px; font-size: 12px;
+    white-space: pre-wrap; word-break: break-word;
+    max-width: 480px; min-width: 200px; box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+  }
+  .prompt-skipped { color: var(--text-muted); font-size: 10px; font-style: italic; }
+  .num { color: var(--accent2); font-weight: 600; }
+  .muted { color: var(--text-muted); font-size: 11px; white-space: nowrap; }
+  .terminal-cell { color: var(--text-muted); font-size: 11px; }
+  .terminal-cell.clickable { cursor: pointer; }
+  .terminal-cell.clickable:hover { color: var(--accent); text-decoration: underline; }
+  .terminal-cell .ghostty-title { color: var(--text-muted); font-size: 10px; opacity: 0.7; }
+
+  .empty { color: var(--text-muted); font-style: italic; padding: 20px; text-align: center; }
+
+  /* Detail panel */
+  .detail-panel {
+    position: fixed; top: 0; right: 0; width: 400px; height: 100vh;
+    background: var(--surface); border-left: 1px solid var(--border);
+    padding: 20px; overflow-y: auto;
+    transform: translateX(100%); transition: transform 0.2s ease;
+    z-index: 100; box-shadow: -4px 0 20px rgba(0,0,0,0.3);
+  }
+  .detail-panel.open { transform: translateX(0); }
+  .panel-header {
+    display: flex; justify-content: space-between; align-items: center;
+    margin-bottom: 16px; padding-bottom: 10px; border-bottom: 1px solid var(--border);
+  }
+  .panel-header h3 { font-size: 14px; color: var(--accent); font-weight: 600; margin: 0; }
+  .panel-meta { font-size: 10px; color: var(--text-muted); margin-top: 2px; }
+  .panel-close {
+    background: none; border: none; color: var(--text-muted); font-size: 18px;
+    cursor: pointer; padding: 4px 8px; border-radius: 4px;
+  }
+  .panel-close:hover { background: var(--surface2); color: var(--text); }
+  .panel-section { margin-bottom: 16px; }
+  .panel-section h4 {
+    font-size: 10px; font-weight: 600; color: var(--text-muted);
+    text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px;
+  }
+  .panel-prompt-block {
+    background: var(--surface2); border-radius: 6px; padding: 8px 10px;
+    font-size: 12px; color: var(--text); white-space: pre-wrap; word-break: break-word;
+    border-left: 2px solid var(--border);
+  }
+  .panel-prompt-block.accent { border-left-color: var(--accent); }
+  .panel-prompt-block.yellow { border-left-color: var(--yellow); }
+  .panel-mono { font-size: 11px; color: var(--accent2); }
+  .panel-prompt-list { display: flex; flex-direction: column; gap: 6px; }
+  .panel-prompt-item {
+    display: flex; gap: 8px; padding: 4px 8px; border-left: 2px solid var(--border);
+    font-size: 12px;
+  }
+  .panel-prompt-item:hover { border-left-color: var(--accent); background: var(--surface2); }
+  .panel-prompt-item .pts { color: var(--text-muted); font-size: 10px; white-space: nowrap; min-width: 40px; }
+  .panel-prompt-item .ptxt { color: var(--text); overflow: hidden; text-overflow: ellipsis; }
+  .panel-total { font-size: 10px; color: var(--text-muted); margin-top: 6px; }
+  tr.selected { background: var(--surface2); outline: 1px solid var(--accent); outline-offset: -1px; }
+</style>
+</head>
+<body>
+
+<div class="header-row">
+  <h1><span>cc</span> sessions</h1>
+  <div class="meta"><span class="dot live"></span>polling 3s &middot; <span id="last-update"></span></div>
+</div>
+
+<div class="section-header">
+  <h2>Sessions</h2>
+  <div class="controls">
+    <div class="pill-group" id="time-pills">
+      <button class="pill active" data-hours="24">24h</button>
+      <button class="pill" data-hours="168">7d</button>
+    </div>
+  </div>
+</div>
+<div class="summary" id="summary"></div>
+<table id="sessions-table">
+  <thead>
+    <tr>
+      <th class="dot-cell"></th>
+      <th class="sortable" data-key="sessionId">ID <span class="arrow">&#9650;</span></th>
+      <th class="sortable sort-active" data-key="project">Project <span class="arrow">&#9650;</span></th>
+      <th>First Prompt</th>
+      <th>Latest Prompt</th>
+      <th class="sortable" data-key="prompts">Prompts <span class="arrow">&#9660;</span></th>
+      <th class="sortable" data-key="lastTs">Last Active <span class="arrow">&#9660;</span></th>
+      <th class="sortable" data-key="durationMin">Duration <span class="arrow">&#9660;</span></th>
+      <th>Terminal</th>
+    </tr>
+  </thead>
+  <tbody id="sessions-body">
+    <tr><td colspan="9" class="empty">Loading...</td></tr>
+  </tbody>
+</table>
+
+<div class="detail-panel" id="detail-panel">
+  <div class="panel-header">
+    <div>
+      <h3 id="panel-project"></h3>
+      <div class="panel-meta" id="panel-meta"></div>
+    </div>
+    <button class="panel-close" onclick="closeDetail()">&times;</button>
+  </div>
+  <div class="panel-section">
+    <h4>First Prompt</h4>
+    <div class="panel-prompt-block accent" id="panel-first-prompt"></div>
+  </div>
+  <div class="panel-section" id="panel-clear-section" style="display:none">
+    <h4>After /clear</h4>
+    <div class="panel-prompt-block yellow" id="panel-clear-prompt"></div>
+  </div>
+  <div class="panel-section" id="panel-resume-section" style="display:none">
+    <h4>Resumed from</h4>
+    <div class="panel-mono" id="panel-resume-id"></div>
+  </div>
+  <div class="panel-section">
+    <h4>Latest Prompts</h4>
+    <div class="panel-prompt-list" id="panel-prompts"></div>
+    <div class="panel-total" id="panel-total"></div>
+  </div>
+</div>
+
+<script>
+const API = '/cc-sessions/api';
+let windowHours = 24;
+let sessionsData = [];
+let sortKey = 'lastTs';
+let sortDir = 'desc';
+let selectedSid = null;
+
+function timeAgo(ts) {
+  if (!ts) return '\u2014';
+  const diff = Date.now() - ts;
+  const mins = Math.floor(diff / 60000);
+  if (mins < 1) return 'just now';
+  if (mins < 60) return mins + 'm ago';
+  const hrs = Math.floor(mins / 60);
+  if (hrs < 24) return hrs + 'h ' + (mins % 60) + 'm ago';
+  const days = Math.floor(hrs / 24);
+  return days + 'd ' + (hrs % 24) + 'h ago';
+}
+
+function duration(mins) {
+  if (!mins && mins !== 0) return '\u2014';
+  if (mins < 1) return '<1m';
+  const hrs = Math.floor(mins / 60);
+  if (hrs > 24) { const d = Math.floor(hrs / 24); return d + 'd ' + (hrs % 24) + 'h'; }
+  if (hrs > 0) return hrs + 'h ' + (mins % 60) + 'm';
+  return mins + 'm';
+}
+
+function fmtTime(ts) {
+  if (!ts) return '';
+  return new Date(ts).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false });
+}
+
+function fmtDateTime(ts) {
+  if (!ts) return '';
+  const d = new Date(ts);
+  const diffDays = Math.floor((Date.now() - ts) / 86400000);
+  const t = d.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false });
+  if (diffDays === 0) return t;
+  if (diffDays === 1) return 'yesterday ' + t;
+  return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) + ' ' + t;
+}
+
+function esc(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
+function escAttr(s) { return s.replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/'/g,'&#39;'); }
+
+function focusTerminal(terminal, cwd) {
+  fetch(`${API}/focus`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ terminal, cwd }),
+  }).then(r => r.json()).then(d => {
+    if (d.tab) document.title = `\u2318${d.tab} to switch tab`;
+    setTimeout(() => { document.title = 'CC Sessions'; }, 3000);
+  }).catch(e => console.error('Focus failed:', e));
+}
+
+function renderSessions() {
+  const data = [...sessionsData];
+  const tbody = document.getElementById('sessions-body');
+  const summary = document.getElementById('summary');
+
+  if (data.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="9" class="empty">No sessions</td></tr>';
+    summary.textContent = '';
+    return;
+  }
+
+  const dir = sortDir === 'asc' ? 1 : -1;
+  data.sort((a, b) => {
+    if (!!a.active !== !!b.active) return a.active ? -1 : 1;
+    const av = a[sortKey], bv = b[sortKey];
+    if (typeof av === 'string') return dir * av.localeCompare(bv);
+    return dir * ((av || 0) - (bv || 0));
+  });
+
+  const activeCount = data.filter(s => s.active).length;
+  const busyCount = data.filter(s => s.busy).length;
+  const gateCount = data.filter(s => s.gate).length;
+  const projects = new Set(data.map(s => s.project));
+  const totalPrompts = data.reduce((a, s) => a + s.prompts, 0);
+  let summaryText = `${activeCount} active`;
+  if (busyCount > 0) summaryText += ` (${busyCount} working)`;
+  summaryText += `, ${data.length - activeCount} inactive \u00b7 ${projects.size} projects \u00b7 ${totalPrompts} prompts`;
+  if (gateCount > 0) summaryText += ` \u00b7 ${gateCount} waiting`;
+  summary.textContent = summaryText;
+
+  // Sort indicators
+  document.querySelectorAll('#sessions-table th.sortable').forEach(th => {
+    const isActive = th.dataset.key === sortKey;
+    th.classList.toggle('sort-active', isActive);
+    if (isActive) th.querySelector('.arrow').innerHTML = sortDir === 'asc' ? '&#9650;' : '&#9660;';
+  });
+
+  tbody.innerHTML = data.map(s => {
+    const dotClass = s.gate ? 'gate' : (s.busy ? 'busy' : (s.active ? 'on' : 'off'));
+    const rowClass = s.gate ? 'has-gate' : (s.active ? '' : 'inactive');
+    const termDisplay = s.ghosttyTitle
+      ? `${esc(s.terminal)}<div class="ghostty-title">${esc(s.ghosttyTitle)}</div>`
+      : esc(s.terminal || '');
+
+    const selClass = s.sessionIdFull === selectedSid ? ' selected' : '';
+    return `
+    <tr class="${rowClass}${selClass}" data-sid="${escAttr(s.sessionIdFull || s.sessionId)}">
+      <td class="dot-cell"><span class="status-dot ${dotClass}"></span></td>
+      <td class="sid">${esc(s.sessionId)}${s.name ? `<br><span style="color:var(--yellow);font-size:10px;">${esc(s.name)}</span>` : ''}${s.gate ? `<br><span class="gate-msg">${esc(s.gate.message || 'waiting')}</span>` : ''}</td>
+      <td class="project-name">${esc(s.project)}</td>
+      <td class="prompt-cell" ${s.firstPrompt ? `data-full="${escAttr(s.firstPrompt)}"` : ''}>${s.firstPrompt ? esc(s.firstPrompt) : '<span class="muted">\u2014</span>'}</td>
+      <td class="prompt-cell" ${s.lastPrompt ? `data-full="${escAttr(s.lastPrompt)}"` : ''}>
+        ${s.lastPrompt ? esc(s.lastPrompt) : '<span class="muted">\u2014</span>'}
+        ${s.lastPromptRaw !== s.lastPrompt && s.lastPromptRaw ? `<div class="prompt-skipped">ended: ${esc(s.lastPromptRaw)}</div>` : ''}
+      </td>
+      <td class="num">${s.prompts}</td>
+      <td class="muted">${fmtDateTime(s.lastTs)}<br>${timeAgo(s.lastTs)}</td>
+      <td class="muted">${duration(s.durationMin)}</td>
+      <td class="terminal-cell${s.terminal ? ' clickable' : ''}" ${s.terminal ? `data-terminal="${escAttr(s.terminal)}" data-cwd="${escAttr(s.fullPath || '')}"` : ''}>${termDisplay}</td>
+    </tr>`;
+  }).join('');
+}
+
+let refreshInFlight = false;
+async function refresh() {
+  if (refreshInFlight) return;
+  refreshInFlight = true;
+  try {
+    const sessRes = await fetch(`${API}/sessions?hours=${windowHours}`);
+    sessionsData = await sessRes.json();
+
+    renderSessions();
+
+    document.getElementById('last-update').textContent = new Date().toLocaleTimeString();
+  } catch (e) {
+    console.error('Refresh failed:', e);
+  } finally {
+    refreshInFlight = false;
+  }
+}
+
+document.getElementById('sessions-table').addEventListener('click', e => {
+  const td = e.target.closest('td.terminal-cell[data-terminal]');
+  if (td) {
+    focusTerminal(td.dataset.terminal, td.dataset.cwd);
+    return;
+  }
+  const tr = e.target.closest('tr[data-sid]');
+  if (tr) {
+    openDetail(tr.dataset.sid);
+    return;
+  }
+});
+
+async function openDetail(sid) {
+  selectedSid = sid;
+  renderSessions();
+  const panel = document.getElementById('detail-panel');
+  try {
+    const res = await fetch(`${API}/sessions/${encodeURIComponent(sid)}/detail`);
+    if (!res.ok) { closeDetail(); return; }
+    const d = await res.json();
+
+    document.getElementById('panel-project').textContent = d.project;
+    document.getElementById('panel-meta').textContent =
+      `${d.sessionId} · ${d.totalPrompts} prompts · ${d.fullPath}`;
+    document.getElementById('panel-first-prompt').textContent = d.firstPrompt || '\u2014';
+
+    const clearSec = document.getElementById('panel-clear-section');
+    if (d.postClearPrompt) {
+      clearSec.style.display = '';
+      document.getElementById('panel-clear-prompt').textContent = d.postClearPrompt;
+    } else {
+      clearSec.style.display = 'none';
+    }
+
+    const resumeSec = document.getElementById('panel-resume-section');
+    if (d.resumedFrom) {
+      resumeSec.style.display = '';
+      document.getElementById('panel-resume-id').textContent = d.resumedFrom;
+    } else {
+      resumeSec.style.display = 'none';
+    }
+
+    document.getElementById('panel-prompts').innerHTML = d.prompts.map(p => `
+      <div class="panel-prompt-item">
+        <span class="pts">${fmtTime(p.timestamp)}</span>
+        <span class="ptxt">${esc(p.display)}</span>
+      </div>
+    `).join('');
+    document.getElementById('panel-total').textContent =
+      d.totalPrompts > 10 ? `showing 10 of ${d.totalPrompts}` : '';
+
+    panel.classList.add('open');
+  } catch (e) {
+    console.error('Detail fetch failed:', e);
+  }
+}
+
+function closeDetail() {
+  selectedSid = null;
+  document.getElementById('detail-panel').classList.remove('open');
+  renderSessions();
+}
+
+document.getElementById('sessions-table').querySelector('thead').addEventListener('click', e => {
+  const th = e.target.closest('th.sortable');
+  if (!th) return;
+  const key = th.dataset.key;
+  if (sortKey === key) { sortDir = sortDir === 'asc' ? 'desc' : 'asc'; }
+  else { sortKey = key; sortDir = (key === 'project' || key === 'sessionId') ? 'asc' : 'desc'; }
+  renderSessions();
+});
+
+document.getElementById('time-pills').addEventListener('click', e => {
+  const btn = e.target.closest('.pill');
+  if (!btn) return;
+  document.querySelectorAll('#time-pills .pill').forEach(p => p.classList.remove('active'));
+  btn.classList.add('active');
+  windowHours = parseInt(btn.dataset.hours);
+  refresh();
+});
+
+let pollTimer = null;
+function startPolling() {
+  if (pollTimer) return;
+  refresh();
+  pollTimer = setInterval(refresh, 3000);
+}
+function stopPolling() {
+  if (!pollTimer) return;
+  clearInterval(pollTimer);
+  pollTimer = null;
+}
+document.addEventListener('visibilitychange', () => {
+  document.hidden ? stopPolling() : startPolling();
+});
+startPolling();
+</script>
+</body>
+</html>
